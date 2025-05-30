@@ -1,15 +1,13 @@
-from typing import Any, Union
-
+from typing import Any
 import numpy as np
-import xarray as xr
 
 
 def kgeo(
     sun_zenith: Any,
     view_zenith: Any,
     relative_azimuth: Any,
-    br: Union[float, int] = 1.0,
-    hb: Union[float, int] = 2.0,
+    br: float = 1.0,
+    hb: float = 2.0,
 ) -> Any:
     """Computes the Geometric Kernel (Kgeo).
 
@@ -53,7 +51,7 @@ def kgeo(
     ) * np.sin(theta_v_dev) * np.cos(phi)
 
     # Equation 42 in Lucht et al., 2000
-    D = np.sqrt(
+    d_ = np.sqrt(
         (np.tan(theta_i_dev) ** 2.0)
         + (np.tan(theta_v_dev) ** 2.0)
         - (2.0 * np.tan(theta_i_dev) * np.tan(theta_v_dev) * np.cos(phi))
@@ -64,7 +62,7 @@ def kgeo(
     cos_t = (
         hb
         * np.sqrt(
-            (D ** 2.0)
+            (d_ ** 2.0)
             + ((np.tan(theta_i_dev) * np.tan(theta_v_dev) * np.sin(phi)) ** 2.0)
         )
         / ((1.0 / np.cos(theta_i_dev)) + (1.0 / np.cos(theta_v_dev)))
@@ -77,16 +75,16 @@ def kgeo(
 
     t = np.arccos(cos_t)
 
-    # Compute the overlap area between the view and solar shadows (O)
+    # Compute the overlap area between the view and solar shadows (o_)
     # Equation 40 in Lucht et al., 2000
-    O = (
+    o_ = (
         (1.0 / np.pi)
         * (t - np.sin(t) * cos_t)
         * ((1.0 / np.cos(theta_i_dev)) + (1.0 / np.cos(theta_v_dev)))
     )
 
     return (
-        O
+        o_
         - (1.0 / np.cos(theta_i_dev))
         - (1.0 / np.cos(theta_v_dev))
         + 0.5

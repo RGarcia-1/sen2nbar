@@ -16,7 +16,7 @@ from .metadata import get_processing_baseline
 from .utils import _extrapolate_c_factor
 
 
-def nbar_SAFE(
+def nbar_safe(
     path: str, cog: bool = True, to_int: bool = False, quiet: bool = False
 ) -> None:
     """Computes the Nadir BRDF Adjusted Reflectance (NBAR) using the SAFE path.
@@ -108,7 +108,7 @@ def nbar_SAFE(
         # Save the image
         img.rio.to_raster(os.path.join(nbar_output_path, filename), driver=driver)
 
-    pbar.set_description(f"Done")
+    pbar.set_description("Done")
 
     # Show the path where the images were saved
     if not quiet:
@@ -141,37 +141,56 @@ def nbar_stac(
     xarray.DataArray
         NBAR data array.
     """
+    # check whether the data was downloaded from Microsoft's planetary computer (PC)
+    is_pc = "planetarycomputer" in stac
+
     # Keep attributes xarray
     xr.set_options(keep_attrs=True)
 
-    # Open catalogue
-    CATALOG = pystac_client.Client.open(stac)
+    # Open catalogue and get items
+    catalog = pystac_client.Client.open(stac)
+    catalog_query = catalog.search(ids=da.id.values, collections=[collection])
 
-    # Do a search
-    SEARCH = CATALOG.search(ids=da.id.values, collections=[collection])
+    items = catalog_query.item_collection()
+    # NOTE: `items` do not follow the order of `da.id.values`
 
-    # Get the items
-    items = SEARCH.item_collection()
+    # convert `items` into a pandas dataframe.
+    df_items = pd.DataFrame(data={"id": [item.id for item in items], "item": items})
+    df_items.set_index(keys="id", inplace=True)
 
-    # Sign the items if using PC
-    if stac == "https://planetarycomputer.microsoft.com/api/stac/v1":
-        items = pc.sign(items)
+    # Save indices to exclude (this for not having angles for all bands)
+    exclude: list[int] = []
 
-    # Order items using pandas
-    df_items = pd.DataFrame(dict(id=[item.id for item in items], item=items)).set_index(
-        "id"
-    )
-    df_da_ids = pd.DataFrame(dict(id=da.id.values)).set_index("id")
-    ordered_df = df_da_ids.join(df_items)
-    ordered_items = ordered_df.item.values
 
-    # Compute the c-factor per item and extract the processing baseline
-    c_array = []
-    processing_baseline = []
-    exclude = []  # Save indices to exclude (this for not having angles for all bands)
+    # process based on the order
+    print("here")
+    import time
+    stime = time.time()
+    for id_ in da.id.values:
+        item = df_items.loc[id_].values[0]  # pystac.item.Item
+        c = c_factor_from_item(item, epsg)
+        print(c)
+        """
+        print(item)
+        c = c_factor_from_item(item, epsg).interp(
+            y=da.y.values,
+            x=da.x.values,
+            method="linear",
+            kwargs={"fill_value": "extrapolate"},
+        )
+        print(c)
+        exit()
+        """
+        print(c.sizes)
+    print(f"completed in: {time.time() - stime: 0.2f} seconds")
+    exit()
+
+    # This for-loop is slow
+    from pprint import pprint
     for i, item in tqdm(
         enumerate(ordered_items), disable=quiet, desc="Processing items", leave=False
     ):
+        pprint(item.properties)
         try:
             c = c_factor_from_item(item, epsg)
             c = c.interp(
@@ -186,7 +205,8 @@ def nbar_stac(
             # Append indices to exclude, then pass
             exclude.append(i)
             warnings.warn(
-                f"""Item {i} with datetime {item.properties['datetime']} omitted as it doesn't have angles for all bands."""
+                f"Item {i} with datetime {item.properties['datetime']} "
+                "omitted as it doesn't have angles for all bands."
             )
             pass
 
@@ -201,8 +221,20 @@ def nbar_stac(
         dims="time",
         coords=dict(time=da.time.values),
     )
+    print(processing_baseline)
+    exit()
 
     # Whether to shift the DN values
+    # https://operations.dashboard.copernicus.eu/processors-viewer.html?search=S2
+    # Tue Jan 25, 2022:
+    # "Provision of negative radiometric values (implementing an offset): the dynamic
+    #  range will be shifted by a band-dependent constant, i.e. BOA_ADD_OFFSET. From
+    #  the user’s point of view, the L2A Surface Reflectance (L2A SR) shall be retri-
+    #  eved from the output radiometry as follows:"
+    #  -> Digital Number DN=0 remains the “NO_DATA” value
+    #  -> For a given DN in [1;215-1], the L2A Surface Reflectance (SR) value will
+    #     be: L2A_SRi = (L2A_DNi + BOA_ADD_OFFSETi) / QUANTIFICATION_VALUEi
+
     # After 04.00 all DN values are shifted by 1000
     harmonize = xr.where(processing_baseline >= 4.0, -1000, 0)
 
@@ -260,7 +292,9 @@ def nbar_stackstac(
     return da
 
 
-def nbar_cubo(da: xr.DataArray, quiet: bool = False) -> xr.DataArray:
+def nbar_cubo(
+    da: xr.DataArray | xr.Dataset, quiet: bool = False
+) -> xr.DataArray | xr.Dataset:
     """Computes the Nadir BRDF Adjusted Reflectance (NBAR) for a :code:`xarray.DataArray`
     obtained via :code:`cubo`.
 
@@ -276,8 +310,8 @@ def nbar_cubo(da: xr.DataArray, quiet: bool = False) -> xr.DataArray:
 
     Returns
     -------
-    xarray.DataArray
-        NBAR data array.
+    xr.DataArray | xr.Dataset
+        NBAR DataArray or Dataset
     """
     # Get info from the cubo data array
     stac = da.attrs["stac"]

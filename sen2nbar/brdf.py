@@ -1,10 +1,8 @@
-from typing import Any, List
-
-import numpy as np
 import xarray as xr
 
-from .axioms import *
-from .kernels import *
+from typing import Any
+from .axioms import fiso, fvol, fgeo
+from .kernels import kvol, kgeo
 
 
 def _f_values_to_xarray(dict_values: dict) -> xr.DataArray:

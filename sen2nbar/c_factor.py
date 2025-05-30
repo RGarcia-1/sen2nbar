@@ -1,14 +1,12 @@
-from typing import Any
-
-import numpy as np
 import pystac
-import rioxarray
+import rioxarray  # noqa: F401
 import xarray as xr
 
-from .axioms import *
-from .brdf import *
-from .metadata import *
-from .utils import _extrapolate_c_factor
+from rasterio.crs import CRS
+from .axioms import fiso
+from .brdf import brdf
+from .metadata import angles_from_metadata
+from .utils import _extrapolate_c_factor, _get_crs, _granule_metadata
 
 
 def c_factor(
@@ -92,21 +90,19 @@ def c_factor_from_item(item: pystac.item.Item, to_epsg: str) -> xr.DataArray:
         c-factor.
     """
     # Retrieve the EPSG from the item
-    SOURCE_EPSG = item.properties["proj:epsg"]
-
-    # Get the EPSG from the string
-    TO_EPSG = float(to_epsg.split(":")[-1])
+    src_crs = _get_crs(item.properties)
+    dst_crs = CRS.from_string(to_epsg)
 
     # Get the granule metadata URL from the item
-    metadata = item.assets["granule-metadata"].href
+    metadata = _granule_metadata(item.assets)
 
     # Compute the c-factor and extrapolate
     c = c_factor_from_metadata(metadata)
     c = _extrapolate_c_factor(c)
 
     # If the CRSs are different: reproject
-    if SOURCE_EPSG != TO_EPSG:
-        c = c.rio.write_crs(f"epsg:{SOURCE_EPSG}")
-        c = c.rio.reproject(f"epsg:{TO_EPSG}").drop("spatial_ref")
+    if src_crs.to_epsg() != dst_crs.to_epsg():
+        c = c.rio.write_crs(src_crs)
+        c = c.rio.reproject(dst_crs).drop("spatial_ref")
 
     return c

@@ -27,7 +27,7 @@ setup(
     install_requires=[
         "cubo>=2024.6.0",
         "pystac",
-        "rasterio>=1.3.6",
+        "rasterio>=1.4.3",
         "requests",
         "rioxarray>=0.13.4",
         "scipy>=1.10.1",
@@ -39,5 +39,9 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Operating System :: OS Independent",
     ],
 )
