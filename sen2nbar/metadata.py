@@ -43,47 +43,54 @@ def _get_23x23_angle_grid(
     geo_info: dict[str, Any]
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
-    Get the x and y coordinates (in meters) of the 23 x 23 angular grid used in Sentinel-2 L2A tile metadata.
+    Get the x and y coordinates (in meters) of the 23 x 23 angular grid used
+    in Sentinel-2 L2A tile metadata.
 
-    This grid provides the coordinates of the sun and view angle values as reported in the
-    `Tile_Angles` metadata section. The angular values are computed on a virtual 23 × 23 grid
-    laid over the tile footprint with 5000-meter spacing between nodes.
-
-    According to ESA (via Florian - Sentinel-2 Technical Manager, OPT-MPC project):
-
-        "The top left node of the grid has the same coordinates as the top left corner of the tile footprint
-        (top left corner of the top left pixel of all the rasters at different spatial resolutions).
-        The grid contains 23 by 23 nodes, each node being separated by 5000 m. The grid fully covers the tile footprint.
-        It should be mentioned that the nodes from the last line and last column of the grid are 200 m away
-        from the bottom and right tile edges, respectively."
+    This grid provides the coordinates of  the sun and view  angle values as
+    reported in the  `Tile_Angles`  metadata section. The angular values are
+    computed on a coarse 23 × 23 grid laid over the tile footprint with 5000
+    metre spacing between nodes.
 
     https://forum.step.esa.int/t/view-and-sun-angles-grid-in-sentinel-2-data/43105/2
+    According to ESA (via Florian - Sentinel-2 Technical Manager, OPT-MPC project):
+
+        "The top left node of the grid has the same coordinates as the top
+         left corner of the tile footprint (top left corner of the top left
+         pixel of all the rasters at different spatial resolutions). The grid
+         contains 23 by 23 nodes, each node being separated by 5000 m. The
+         grid fully covers the tile footprint. It should be mentioned that
+         the nodes from the last line and last column of the grid are 200 m
+         away from the bottom and right tile edges, respectively."
+
 
     Parameters
     ----------
     geo_info : dict[str, Any]
-        Dictionary parsed from the Sentinel-2 L2A tile metadata containing 'Tile_Geocoding' information.
+        Dictionary from the Sentinel-2 L2A tile metadata containing
+        'Tile_Geocoding' information.
 
     Returns
     -------
-    x : np.ndarray
-        1D array of x coordinates (UTM meters) for the 23 angular grid columns.
-
-    y : np.ndarray
-        1D array of y coordinates (UTM meters) for the 23 angular grid rows.
+    x, y : npt.NDArray[np.float64]
+        1D array of x and y coordinates (UTM meters) for the 23 angular grid columns.
     """
     tile_geocoding = geo_info["Tile_Geocoding"]
-    res = float(tile_geocoding["Size"][0]["@resolution"])  # meters per pixel
+    res = float(tile_geocoding["Size"][0]["@resolution"])  # metres
     nrows = int(tile_geocoding["Size"][0]["NROWS"])
     ncols = int(tile_geocoding["Size"][0]["NCOLS"])
-    x_ul = float(tile_geocoding["Geoposition"][0]["ULX"])
-    y_ul = float(tile_geocoding["Geoposition"][0]["ULY"])
+    x_ul = float(tile_geocoding["Geoposition"][0]["ULX"])  # upper left x
+    y_ul = float(tile_geocoding["Geoposition"][0]["ULY"])  # upper left y
+    # NOTE: `x_ul` and `y_ul` are the same for all resolutions (10, 20, 60 m)
 
     # Construct x and y center coordinate arrays for the 23x23 angle grid
     x_tmp = np.arange(GRID_SIZE) * GRID_RES
     y_tmp = np.arange(GRID_SIZE) * GRID_RES
 
-    # Set last grid node to 200 m before the tile edge
+    # At the moment x_tmp[22] and y_tmp[22] overshoots the footprint of
+    # the array, that is, 
+    #     x_tmp[22] > ncols * res, and;
+    #     y_tmp[22] > nrows * res
+    # Therefore, set the last grid node to 200 m before the tile edge.
     x_tmp[-1] = ncols * res - 200
     y_tmp[-1] = nrows * res - 200
 
@@ -122,19 +129,6 @@ def angles_from_metadata(metadata: str) -> xr.DataArray:
     x, y = _get_23x23_angle_grid(
         geo_info=data["n1:Level-2A_Tile_ID"]["n1:Geometric_Info"]
     )
-    # get the upper left corner
-    x_ul = float(Tile_Geocoding["Geoposition"][0]["ULX"])
-    y_ul = float(Tile_Geocoding["Geoposition"][0]["ULY"])
-
-    # compute x and y coordinates of the array to create
-    # NOTE: ESA provides the sun and view data in a 23x23 grid
-    #       at 5000 m resolution, see:
-    # https://step.esa.int/main/wp-content/help/versions/11.0.0/snap-community-plugins/
-    #         org.eomasters.eomtbxp.eomtbxp.toolbox/pages/s2geom/S2GeometryUpscaling.html
-    y = np.arange(y_ul, y_ul - 5000 * 23, -5000) - 2500
-    x = np.arange(x_ul, x_ul + 5000 * 23, 5000) + 2500
-
-    exit()
 
     # Band names
     band_names = ["B" + f"0{x}"[-2:] for x in np.arange(1, 13)]
@@ -174,6 +168,8 @@ def angles_from_metadata(metadata: str) -> xr.DataArray:
                 [bands_dict[band_name][angle] for angle in ANGLES]
             )  # dims = [num_angles, len(x), len(y)
 
+    from pprint import pprint
+    pprint(filt_band_dict)
     exit()
     # Create the array
     try:
