@@ -148,6 +148,7 @@ def nbar_stac(
     xr.set_options(keep_attrs=True)
 
     # Open catalogue and get items
+    print("querying STAC client")
     catalog = pystac_client.Client.open(stac)
     catalog_query = catalog.search(ids=da.id.values, collections=[collection])
 
@@ -160,7 +161,6 @@ def nbar_stac(
 
     # Save indices to exclude (this for not having angles for all bands)
     exclude: list[int] = []
-
 
     # process based on the order
     print("here")
@@ -224,6 +224,10 @@ def nbar_stac(
     print(processing_baseline)
     exit()
 
+
+    # Zeros are NaN [DATA WILL EITHER BE INT16 OR UINT16 --> setting to np.nan should be avoided]
+    da = da.where(lambda x: x > 0, other=np.nan)
+
     # Whether to shift the DN values
     # https://operations.dashboard.copernicus.eu/processors-viewer.html?search=S2
     # Tue Jan 25, 2022:
@@ -235,14 +239,10 @@ def nbar_stac(
     #  -> For a given DN in [1;215-1], the L2A Surface Reflectance (SR) value will
     #     be: L2A_SRi = (L2A_DNi + BOA_ADD_OFFSETi) / QUANTIFICATION_VALUEi
 
-    # After 04.00 all DN values are shifted by 1000
-    harmonize = xr.where(processing_baseline >= 4.0, -1000, 0)
-
-    # Zeros are NaN
-    da = da.where(lambda x: x > 0, other=np.nan)
-
-    # Harmonize (use processing baseline)
-    da = da + harmonize
+    if is_pc:
+        # After 04.00 all DN values are shifted by 1000
+        harmonize = xr.where(processing_baseline >= 4.0, -1000, 0)
+        da = da + harmonize
 
     # Concatenate c-factor
     c = xr.concat(c_array, dim="time")

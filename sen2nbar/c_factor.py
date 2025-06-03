@@ -10,7 +10,7 @@ from .utils import _extrapolate_c_factor, _get_crs, _granule_metadata
 
 
 def c_factor(
-    sun_zenith: xr.DataArray, view_zenith: xr.DataArray, relative_azimuth: xr.DataArray
+    sun_zenith: xr.DataArray, view_zenith: xr.Dataset, relative_azimuth: xr.Dataset
 ) -> xr.DataArray:
     """Computes the c-factor.
 
@@ -19,11 +19,13 @@ def c_factor(
 
     Parameters
     ----------
-    sun_zenith : xarray.DataArray
+    sun_zenith : xr.DataArray
         Sun Zenith angles in degrees.
-    view_zenith : xarray.DataArray
+
+    view_zenith : xrDataset
         Sensor Zenith angles in degrees.
-    relative_azimuth : xarray.DataArray
+
+    relative_azimuth : xr.Dataset
         Relative Azimuth angles in degrees.
 
     Returns
@@ -58,20 +60,14 @@ def c_factor_from_metadata(metadata: str) -> xr.DataArray:
     BANDS = list(fiso.keys())
 
     # Get the Sun and View angles
-    sun_view_angles = angles_from_metadata(metadata)
-
-    # Get the Sun Zenith
-    theta = sun_view_angles.sel(angle="Zenith", band="Sun")
-
-    # Get the View Zenith
-    vartheta = sun_view_angles.sel(angle="Zenith", band=BANDS)
+    zen_ds, azi_ds = angles_from_metadata(metadata)
 
     # Compute the relative azimuth per band
-    phi = sun_view_angles.sel(angle="Azimuth", band="Sun") - sun_view_angles.sel(
-        angle="Azimuth", band=BANDS
-    )
+    relazi_ds = azi_ds["sun"] - azi_ds[BANDS]
 
-    return c_factor(theta, vartheta, phi)
+    return c_factor(
+        sun_zenith=zen_ds["sun"], view_zenith=zen_ds[BANDS], relative_azimuth=relazi_ds
+    )
 
 
 def c_factor_from_item(item: pystac.item.Item, to_epsg: str) -> xr.DataArray:
