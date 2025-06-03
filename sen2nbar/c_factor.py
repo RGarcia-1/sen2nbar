@@ -1,12 +1,12 @@
-import pystac
 import rioxarray  # noqa: F401
 import xarray as xr
 
 from rasterio.crs import CRS
+from typing import Any
 from .axioms import fiso
 from .brdf import brdf
 from .metadata import angles_from_metadata
-from .utils import _extrapolate_c_factor, _get_crs, _granule_metadata
+from .utils import _extrapolate_c_factor
 
 
 def c_factor(
@@ -65,20 +65,42 @@ def c_factor_from_metadata(metadata: str) -> xr.DataArray:
     # Compute the relative azimuth per band
     relazi_ds = azi_ds["sun"] - azi_ds[BANDS]
 
-    return c_factor(
+    c = c_factor(
         sun_zenith=zen_ds["sun"], view_zenith=zen_ds[BANDS], relative_azimuth=relazi_ds
     )
+    c.attrs = zen_ds.attrs
+    # NOTE: c.attrs = {"crs": "EPSG:XXXXX"}
+
+    # Drop the "band" coordinate as it creates issues later
+    coords = {k: v for k, v in c.coords.items() if k != "band"}
+    dims = [k for k in c.coords if k != "band"]
+    c_fixed = xr.Dataset(
+        data_vars={
+            b: (dims, c[b].sel(band=b).data) for b in c.data_vars  # this is the worst
+        },
+        coords=coords,
+        attrs=c.attrs
+    )
+
+    # `c_fixed` has been verified with the following:
+    # >>> for b in c.data_vars:
+    # >>>    aaa = c[b].sel(band=b).data
+    # >>>    bbb = c_fixed[b].data
+    # >>>    test = ((aaa == bbb) | (np.isnan(aaa) & np.isnan(bbb))).all()
+    # >>>    print(b, test)
+
+    return c_fixed
 
 
-def c_factor_from_item(item: pystac.item.Item, to_epsg: str) -> xr.DataArray:
+def c_factor_from_xml(metadata_xml: str, dst_crs: Any) -> xr.DataArray:
     """Gets the c-factor per band from a Sentinel-2 :code:`pystac.Item`.
 
     Parameters
     ----------
-    item : pystac.item.Item
-        Item to get the c-factor from.
-    to_epsg : str
-        EPSG code to reproject the c-factor to (e.g. "epsg:3115")
+    metadata_xml : str
+        metadata xml
+    dst_crs : Any
+        destination CRS
 
     Returns
     -------
@@ -86,19 +108,19 @@ def c_factor_from_item(item: pystac.item.Item, to_epsg: str) -> xr.DataArray:
         c-factor.
     """
     # Retrieve the EPSG from the item
-    src_crs = _get_crs(item.properties)
-    dst_crs = CRS.from_string(to_epsg)
-
-    # Get the granule metadata URL from the item
-    metadata = _granule_metadata(item.assets)
+    dst_crs = CRS.from_user_input(dst_crs)
 
     # Compute the c-factor and extrapolate
-    c = c_factor_from_metadata(metadata)
+    c = c_factor_from_metadata(metadata_xml)
     c = _extrapolate_c_factor(c)
+
+    src_crs = CRS.from_string(c.attrs["crs"])
+    c.rio.write_crs(src_crs, inplace=True)
 
     # If the CRSs are different: reproject
     if src_crs.to_epsg() != dst_crs.to_epsg():
-        c = c.rio.write_crs(src_crs)
+
         c = c.rio.reproject(dst_crs).drop("spatial_ref")
+        c.rio.write_crs(dst_crs, inplace=True)
 
     return c

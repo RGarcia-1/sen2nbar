@@ -32,6 +32,7 @@ setup(
         "rioxarray>=0.13.4",
         "scipy>=1.10.1",
         "tqdm",
+        "defusedxml",
         "xmltodict",
     ],
     classifiers=[

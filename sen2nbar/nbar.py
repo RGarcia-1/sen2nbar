@@ -1,23 +1,24 @@
 import os
+import tempfile
 import warnings
 from glob import glob
-
-import numpy as np
-import pandas as pd
-import planetary_computer as pc
-import pystac_client
-import rioxarray
-import xarray as xr
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
+import numpy as np
+import planetary_computer as pc
+import rioxarray
+import xarray as xr
+
 from .axioms import bands
-from .c_factor import c_factor_from_item, c_factor_from_metadata
+from .c_factor import c_factor_from_xml, c_factor_from_metadata
 from .metadata import get_processing_baseline
-from .utils import _extrapolate_c_factor
+from .utils import _extrapolate_c_factor, _get_xml_dict, _fetch_xml, _create_session
 
 
 def nbar_safe(
-    path: str, cog: bool = True, to_int: bool = False, quiet: bool = False
+    path: str | Path, cog: bool = True, to_int: bool = False, quiet: bool = False
 ) -> None:
     """Computes the Nadir BRDF Adjusted Reflectance (NBAR) using the SAFE path.
 
@@ -27,7 +28,7 @@ def nbar_safe(
 
     Parameters
     ----------
-    path : str
+    path : str | Path
         SAFE path.
     cog : bool, default = True
         Whether to save the images as Cloud Optimized GeoTIFF (COG).
@@ -40,6 +41,7 @@ def nbar_safe(
     -------
     None
     """
+    path = Path(path)
     # Whether to save as COG
     if cog:
         driver = "COG"
@@ -47,17 +49,14 @@ def nbar_safe(
         driver = None
 
     # NBAR folder to store the images
-    nbar_output_path = os.path.join(path, "NBAR")
-
-    # Create folder inside the SAFE path
-    if not os.path.exists(nbar_output_path):
-        os.makedirs(nbar_output_path)
+    nbar_output_path = path / "NBAR"
+    nbar_output_path.mkdir(exist_ok=True)
 
     # Metadata file
     metadata = glob(os.path.join(path, "GRANULE", "*", "MTD_TL.xml"))[0]
 
     # Processing baseline
-    PROCESSING_BASELINE = get_processing_baseline(os.path.join(path, "MTD_MSIL2A.xml"))
+    PROCESSING_BASELINE = get_processing_baseline(path / "MTD_MSIL2A.xml")
 
     # Whether to shift the DN values
     # After 04.00 all DN values are shifted by 1000
@@ -147,23 +146,29 @@ def nbar_stac(
     # Keep attributes xarray
     xr.set_options(keep_attrs=True)
 
-    # Open catalogue and get items
-    print(ds.id.values)
-    if "granule_metadata" in ds.coords:
-        xmls = ds.coords["granule_metadata"].values
-        print(xmls)
+    # Get the xml url for each ID in the dataset
+    xml_md = _get_xml_dict(ds, stac, collection)
+
+    cache_xml: dict[str, str] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        session = _create_session(max_retries=3)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(_fetch_xml, granule_id, url, tmp_path, session): granule_id
+                for granule_id, url in xml_md.items()
+            }
+
+            for future in as_completed(futures):
+                granule_id, path = future.result()
+                cache_xml[granule_id] = path
+
+        # Extract the angles and compute the BRDF c-factors
+        for id_, xml_path in cache_xml.items():
+            c = c_factor_from_xml(xml_path, dst_crs=epsg)
+            print(c)
     exit()
-
-    print("querying STAC client")
-    catalog = pystac_client.Client.open(stac)
-    catalog_query = catalog.search(ids=ds.id.values, collections=[collection])
-
-    items = catalog_query.item_collection()
-    # NOTE: `items` do not follow the order of `da.id.values`
-
-    # convert `items` into a pandas dataframe.
-    df_items = pd.DataFrame(data={"id": [item.id for item in items], "item": items})
-    df_items.set_index(keys="id", inplace=True)
 
     # Save indices to exclude (this for not having angles for all bands)
     exclude: list[int] = []
@@ -207,7 +212,7 @@ def nbar_stac(
             )
             c_array.append(c)
             processing_baseline.append(item.properties["s2:processing_baseline"])
-        except ValueError:
+        except ValueError:  # FIXME: THIS ISN'T GOING TO OCCUR ANYMORE
             # Append indices to exclude, then pass
             exclude.append(i)
             warnings.warn(
