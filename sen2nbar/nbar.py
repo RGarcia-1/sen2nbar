@@ -116,8 +116,8 @@ def nbar_safe(
 
 
 def nbar_stac(
-    da: xr.DataArray, stac: str, collection: str, epsg: str, quiet: bool = False
-) -> xr.DataArray:
+    ds: xr.Dataset, stac: str, collection: str, epsg: str, quiet: bool = False
+) -> xr.Dataset:
     """Computes the Nadir BRDF Adjusted Reflectance (NBAR) for a :code:`xarray.DataArray`.
 
     If the processing baseline is greater than 04.00, the DN values are automatically
@@ -125,8 +125,8 @@ def nbar_stac(
 
     Parameters
     ----------
-    da : xarray.DataArray
-        Data array to use for the NBAR calculation.
+    da : xr.Dataset
+        Dataset to use for the NBAR calculation.
     stac : str
         STAC Endpoint of the data array.
     collection : str
@@ -138,8 +138,8 @@ def nbar_stac(
 
     Returns
     -------
-    xarray.DataArray
-        NBAR data array.
+    xarray.Dataset
+        NBAR dataset
     """
     # check whether the data was downloaded from Microsoft's planetary computer (PC)
     is_pc = "planetarycomputer" in stac
@@ -148,9 +148,15 @@ def nbar_stac(
     xr.set_options(keep_attrs=True)
 
     # Open catalogue and get items
+    print(ds.id.values)
+    if "granule_metadata" in ds.coords:
+        xmls = ds.coords["granule_metadata"].values
+        print(xmls)
+    exit()
+
     print("querying STAC client")
     catalog = pystac_client.Client.open(stac)
-    catalog_query = catalog.search(ids=da.id.values, collections=[collection])
+    catalog_query = catalog.search(ids=ds.id.values, collections=[collection])
 
     items = catalog_query.item_collection()
     # NOTE: `items` do not follow the order of `da.id.values`
@@ -166,7 +172,7 @@ def nbar_stac(
     print("here")
     import time
     stime = time.time()
-    for id_ in da.id.values:
+    for id_ in ds.id.values:
         item = df_items.loc[id_].values[0]  # pystac.item.Item
         c = c_factor_from_item(item, epsg)
         print(c)
@@ -194,8 +200,8 @@ def nbar_stac(
         try:
             c = c_factor_from_item(item, epsg)
             c = c.interp(
-                y=da.y.values,
-                x=da.x.values,
+                y=ds.y.values,
+                x=ds.x.values,
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
             )
@@ -212,21 +218,21 @@ def nbar_stac(
 
     # Exclude all timesteps were tile angles didn't exist for all bands
     if len(exclude) > 0:
-        include = np.delete(np.arange(da.time.shape[0]), exclude)
-        da = da.isel(time=include)
+        include = np.delete(np.arange(ds.time.shape[0]), exclude)
+        ds = ds.isel(time=include)
 
     # Processing baseline as data array
     processing_baseline = xr.DataArray(
         [float(x) for x in processing_baseline],
         dims="time",
-        coords=dict(time=da.time.values),
+        coords=dict(time=ds.time.values),
     )
     print(processing_baseline)
     exit()
 
 
     # Zeros are NaN [DATA WILL EITHER BE INT16 OR UINT16 --> setting to np.nan should be avoided]
-    da = da.where(lambda x: x > 0, other=np.nan)
+    ds = ds.where(lambda x: x > 0, other=np.nan)
 
     # Whether to shift the DN values
     # https://operations.dashboard.copernicus.eu/processors-viewer.html?search=S2
@@ -242,20 +248,20 @@ def nbar_stac(
     if is_pc:
         # After 04.00 all DN values are shifted by 1000
         harmonize = xr.where(processing_baseline >= 4.0, -1000, 0)
-        da = da + harmonize
+        ds = ds + harmonize
 
     # Concatenate c-factor
     c = xr.concat(c_array, dim="time")
-    c["time"] = da.time.values
+    c["time"] = ds.time.values
 
     # Compute NBAR
-    da = da * c
+    ds = ds * c
 
     # Delete infinite values
-    da = da.astype("float32")
-    da = da.where(lambda x: np.isfinite(x), other=np.nan)
+    ds = ds.astype("float32")
+    ds = ds.where(lambda x: np.isfinite(x), other=np.nan)
 
-    return da
+    return ds
 
 
 def nbar_stackstac(
