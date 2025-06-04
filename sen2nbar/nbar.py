@@ -1,20 +1,25 @@
 import os
 import tempfile
-import warnings
 from glob import glob
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 import numpy as np
-import planetary_computer as pc
 import rioxarray
 import xarray as xr
 
 from .axioms import bands
 from .c_factor import c_factor_from_xml, c_factor_from_metadata
 from .metadata import get_processing_baseline
-from .utils import _extrapolate_c_factor, _get_xml_dict, _fetch_xml, _create_session
+from .utils import _extrapolate_c_factor
+from .utils import _get_xml_dict
+from .utils import _fetch_xml
+from .utils import _create_session
+from .utils import _apply_scale_offset
+
+
+OTHER_DVARS = ["aot", "scl", "wvp"]
 
 
 def nbar_safe(
@@ -90,6 +95,8 @@ def nbar_safe(
         img = img.where(lambda x: x > 0, other=np.nan)
 
         # Harmonize
+        # This is a poor way of handling this as the xml file has
+        # all the offsets and scale factors
         if harmonize:
             img = img - 1000
 
@@ -119,13 +126,18 @@ def nbar_stac(
 ) -> xr.Dataset:
     """Computes the Nadir BRDF Adjusted Reflectance (NBAR) for a :code:`xarray.DataArray`.
 
-    If the processing baseline is greater than 04.00, the DN values are automatically
-    shifted before computing NBAR.
+    For L2A STAC items taken from Microsoft Planetary Computer:
+        If the processing baseline is greater than 04.00, the DN values
+        are automatically shifted before computing NBAR.
+
+    For L2A STAC items taken from AWS Element84
+        The offset to subtract is given in the offset attributes
+        of each data variable in the `ds`
 
     Parameters
     ----------
-    da : xr.Dataset
-        Dataset to use for the NBAR calculation.
+    ds : xr.Dataset {dims=(time, y, x)}
+        Sentinel-2 L2A Dataset
     stac : str
         STAC Endpoint of the data array.
     collection : str
@@ -137,136 +149,95 @@ def nbar_stac(
 
     Returns
     -------
-    xarray.Dataset
-        NBAR dataset
+    xr.Dataset {dims=(time, y, x)}
+        NBAR - the BRDF corrected L2A dataset
     """
     # check whether the data was downloaded from Microsoft's planetary computer (PC)
     is_pc = "planetarycomputer" in stac
+    is_aws = "aws.element84" in stac
 
     # Keep attributes xarray
     xr.set_options(keep_attrs=True)
 
-    # Get the xml url for each ID in the dataset
-    xml_md = _get_xml_dict(ds, stac, collection)
-
-    cache_xml: dict[str, str] = {}
+    # 1. Get the xml url for each ID in the dataset
+    xml_md = _get_xml_dict(ds, stac, collection)  # dict[str, dict[str, datetime | str]]
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         session = _create_session(max_retries=3)
 
+        # 2. Parallelise the download of the xml file (stored in `tmp_path`).
+        #    The download is the slowest part of this entire function!!!
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {
-                executor.submit(_fetch_xml, granule_id, url, tmp_path, session): granule_id
-                for granule_id, url in xml_md.items()
-            }
+            futures = {}
+            for granule_id in xml_md:
+                url = xml_md[granule_id]["xml"]
+                time = xml_md[granule_id]["time"]
+                futures[
+                    executor.submit(
+                        _fetch_xml, granule_id, url, time, tmp_path, session
+                    )
+                ] = granule_id
 
             for future in as_completed(futures):
-                granule_id, path = future.result()
-                cache_xml[granule_id] = path
+                granule_id, time, xml_path = future.result()
+                xml_md[granule_id]["local_xml"] = xml_path  # Path or None
 
-        # Extract the angles and compute the BRDF c-factors
-        for id_, xml_path in cache_xml.items():
-            c = c_factor_from_xml(xml_path, dst_crs=epsg)
-            print(c)
-    exit()
+        # 3. Extract the viewing and sun zenith and azimuthal angles from
+        #    the xml file then compute the BRDF c-factors (Roy et al., 2017)
+        corrected_datasets: list[xr.Dataset] = []
+        ds_id_vals = ds.id.values
+        band_vars = [k for k in ds.data_vars if k.lower() not in OTHER_DVARS]
+        other_vars = [k for k in ds.data_vars if k.lower() in OTHER_DVARS]
 
-    # Save indices to exclude (this for not having angles for all bands)
-    exclude: list[int] = []
+        for granule_id in xml_md:
+            xml_path = xml_md[granule_id]["local_xml"]
+            time = xml_md[granule_id]["time"]
 
-    # process based on the order
-    print("here")
-    import time
-    stime = time.time()
-    for id_ in ds.id.values:
-        item = df_items.loc[id_].values[0]  # pystac.item.Item
-        c = c_factor_from_item(item, epsg)
-        print(c)
-        """
-        print(item)
-        c = c_factor_from_item(item, epsg).interp(
-            y=da.y.values,
-            x=da.x.values,
-            method="linear",
-            kwargs={"fill_value": "extrapolate"},
-        )
-        print(c)
-        exit()
-        """
-        print(c.sizes)
-    print(f"completed in: {time.time() - stime: 0.2f} seconds")
-    exit()
+            # `c_id` is xr.Dataset dims=["y", "x"]
+            c_id = c_factor_from_xml(xml_path, dst_crs=epsg, is_aws=is_aws)
+            c_id.attrs = {"time": time, "id": granule_id}
 
-    # This for-loop is slow
-    from pprint import pprint
-    for i, item in tqdm(
-        enumerate(ordered_items), disable=quiet, desc="Processing items", leave=False
-    ):
-        pprint(item.properties)
-        try:
-            c = c_factor_from_item(item, epsg)
-            c = c.interp(
+            # interpolate `c_id` to match `y` and `x` of `ds`
+            c_inter_id = c_id.interp(
                 y=ds.y.values,
                 x=ds.x.values,
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
+            ).astype(np.float32)
+
+            # time is not unique therefore use the ID for the matching
+            time_match = [
+                i for i in range(len(ds_id_vals)) if ds_id_vals[i] == granule_id
+            ]
+            n_mtime = len(time_match)
+            if n_mtime != 1:
+                msg = (
+                    f"Expected a single match for {granule_id}, but found {n_mtime}\n:"
+                    f"matching granule ids: {ds_id_vals[time_match]}"
+                )
+                raise ValueError(msg)
+
+            # Select time slice and apply the scale and offsets
+            ds_slice = ds.isel(time=time_match[0])
+
+            # Apply the scale and offset to `ds_slice` and multiply the c-factors
+            corrected_slice = (
+                _apply_scale_offset(ds=ds_slice[band_vars], is_pc=is_pc)
+                * c_inter_id[band_vars]  # some data variables maybe all np.nan's
             )
-            c_array.append(c)
-            processing_baseline.append(item.properties["s2:processing_baseline"])
-        except ValueError:  # FIXME: THIS ISN'T GOING TO OCCUR ANYMORE
-            # Append indices to exclude, then pass
-            exclude.append(i)
-            warnings.warn(
-                f"Item {i} with datetime {item.properties['datetime']} "
-                "omitted as it doesn't have angles for all bands."
+            corrected_slice = corrected_slice.where(
+                np.isfinite(corrected_slice), other=np.nan
             )
-            pass
 
-    # Exclude all timesteps were tile angles didn't exist for all bands
-    if len(exclude) > 0:
-        include = np.delete(np.arange(ds.time.shape[0]), exclude)
-        ds = ds.isel(time=include)
-
-    # Processing baseline as data array
-    processing_baseline = xr.DataArray(
-        [float(x) for x in processing_baseline],
-        dims="time",
-        coords=dict(time=ds.time.values),
-    )
-    print(processing_baseline)
-    exit()
-
-
-    # Zeros are NaN [DATA WILL EITHER BE INT16 OR UINT16 --> setting to np.nan should be avoided]
-    ds = ds.where(lambda x: x > 0, other=np.nan)
-
-    # Whether to shift the DN values
-    # https://operations.dashboard.copernicus.eu/processors-viewer.html?search=S2
-    # Tue Jan 25, 2022:
-    # "Provision of negative radiometric values (implementing an offset): the dynamic
-    #  range will be shifted by a band-dependent constant, i.e. BOA_ADD_OFFSET. From
-    #  the user’s point of view, the L2A Surface Reflectance (L2A SR) shall be retri-
-    #  eved from the output radiometry as follows:"
-    #  -> Digital Number DN=0 remains the “NO_DATA” value
-    #  -> For a given DN in [1;215-1], the L2A Surface Reflectance (SR) value will
-    #     be: L2A_SRi = (L2A_DNi + BOA_ADD_OFFSETi) / QUANTIFICATION_VALUEi
-
-    if is_pc:
-        # After 04.00 all DN values are shifted by 1000
-        harmonize = xr.where(processing_baseline >= 4.0, -1000, 0)
-        ds = ds + harmonize
+            # Add back the SCL, AOT, WVP data variables to `corrected_slice`
+            corrected_slice = corrected_slice.assign(
+                variables={v: ds_slice[v] for v in other_vars}
+            )
+            corrected_datasets.append(corrected_slice)
 
     # Concatenate c-factor
-    c = xr.concat(c_array, dim="time")
-    c["time"] = ds.time.values
-
-    # Compute NBAR
-    ds = ds * c
-
-    # Delete infinite values
-    ds = ds.astype("float32")
-    ds = ds.where(lambda x: np.isfinite(x), other=np.nan)
-
-    return ds
+    corrected_ds = xr.concat(corrected_datasets, dim="time")
+    return corrected_ds
 
 
 def nbar_stackstac(

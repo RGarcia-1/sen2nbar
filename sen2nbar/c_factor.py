@@ -9,6 +9,26 @@ from .metadata import angles_from_metadata
 from .utils import _extrapolate_c_factor
 
 
+# see: https://radiantearth.github.io/stac-browser/#/external/
+#                  earth-search.aws.element84.com/v1/collections/
+#                  sentinel-2-l2a?.language=en
+AWS_BNAMES_MAPPING = {  # Mapping Band Number to Band Name
+    "B01": "coastal",
+    "B02": "blue",
+    "B03": "green",
+    "B04": "red",
+    "B05": "rededge1",
+    "B06": "rededge2",
+    "B07": "rededge3",
+    "B08": "nir",
+    "B8A": "nir08",
+    "B09": "nir09",
+    "B10": "cirrus",  # NOT AVAILABLE
+    "B11": "swir16",
+    "B12": "swir22",
+}
+
+
 def c_factor(
     sun_zenith: xr.DataArray, view_zenith: xr.Dataset, relative_azimuth: xr.Dataset
 ) -> xr.DataArray:
@@ -43,13 +63,17 @@ def c_factor(
     )
 
 
-def c_factor_from_metadata(metadata: str) -> xr.DataArray:
+def c_factor_from_metadata(metadata: str, is_aws: bool = False) -> xr.DataArray:
     """Gets the c-factor per band from Sentinel-2 granule metadata.
 
     Parameters
     ----------
     metadata : str
         Path to the metadata file. An URL can also be used.
+    is_aws : bool
+        Whether the STAC dataset was taken from AWS Element84.
+        AWS Element84 uses different band naming convention
+        from other providers.
 
     Returns
     -------
@@ -89,10 +113,19 @@ def c_factor_from_metadata(metadata: str) -> xr.DataArray:
     # >>>    test = ((aaa == bbb) | (np.isnan(aaa) & np.isnan(bbb))).all()
     # >>>    print(b, test)
 
+    # rename `c_fixed` to match the band names from AWS Element 84.
+    if is_aws:
+        valid_map = {
+            k: v for k, v in AWS_BNAMES_MAPPING.items() if k in c_fixed.data_vars
+        }
+        c_fixed = c_fixed.rename_vars(valid_map)
+
     return c_fixed
 
 
-def c_factor_from_xml(metadata_xml: str, dst_crs: Any) -> xr.DataArray:
+def c_factor_from_xml(
+    metadata_xml: str, dst_crs: Any, is_aws: bool = False
+) -> xr.DataArray:
     """Gets the c-factor per band from a Sentinel-2 :code:`pystac.Item`.
 
     Parameters
@@ -101,6 +134,10 @@ def c_factor_from_xml(metadata_xml: str, dst_crs: Any) -> xr.DataArray:
         metadata xml
     dst_crs : Any
         destination CRS
+    is_aws : bool
+        Whether the STAC dataset was taken from AWS Element84.
+        AWS Element84 uses different band naming convention
+        from other providers.
 
     Returns
     -------
@@ -111,7 +148,7 @@ def c_factor_from_xml(metadata_xml: str, dst_crs: Any) -> xr.DataArray:
     dst_crs = CRS.from_user_input(dst_crs)
 
     # Compute the c-factor and extrapolate
-    c = c_factor_from_metadata(metadata_xml)
+    c = c_factor_from_metadata(metadata_xml, is_aws)
     c = _extrapolate_c_factor(c)
 
     src_crs = CRS.from_string(c.attrs["crs"])

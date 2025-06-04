@@ -4,8 +4,9 @@ import numpy.typing as npt
 import xarray as xr
 import pandas as pd
 import pystac_client
-from pathlib import Path
 from json import dumps as jdumps
+from pathlib import Path
+from typing import Any, Callable
 from pystac.asset import Asset
 from rasterio.crs import CRS
 from requests.adapters import HTTPAdapter
@@ -84,11 +85,15 @@ def _granule_metadata(asset_md: dict[str, Asset]) -> str:
     return asset_md[gm_key].href
 
 
-def _get_xml_dict(ds: xr.Dataset, stac: str, collection: str) -> dict[str, str]:
-    xml_md: dict[str, str] = {}
+def _get_xml_dict(
+    ds: xr.Dataset, stac: str, collection: str
+) -> dict[str, dict[str, np.datetime64 | str]]:
+    xml_md: dict[str, dict[str, Any]] = {}
     if "granule_metadata" in ds.coords:
-        for id_, xml_ in zip(ds.id.values, ds.granule_metadata.values):
-            xml_md[id_] = xml_
+        for id_, t_, xml_ in zip(
+            ds.id.values, ds.time.values, ds.granule_metadata.values
+        ):
+            xml_md[id_] = {"xml": xml_, "time": t_}
     else:
         # querying STAC client
         catalog = pystac_client.Client.open(stac)
@@ -100,9 +105,12 @@ def _get_xml_dict(ds: xr.Dataset, stac: str, collection: str) -> dict[str, str]:
         # convert `items` into a pandas dataframe.
         df_items = pd.DataFrame(data={"id": [item.id for item in items], "item": items})
         df_items.set_index(keys="id", inplace=True)
-        for id_ in ds.id.values:
+        for id_, t_ in zip(ds.id.values, ds.time.values):
             item = df_items.loc[id_].values[0]
-            xml_md[id_] = _granule_metadata(item.assets)
+            xml_md[id_] = {
+                "xml": _granule_metadata(item.assets),
+                "time": t_,
+            }
     return xml_md
 
 
@@ -187,7 +195,13 @@ def _extrapolate_c_factor(ds: xr.Dataset) -> xr.Dataset:
     )
 
 
-def _fetch_xml(granule_id: str, url: str, tempdir: Path, session: requests.Session):
+def _fetch_xml(
+    granule_id: str,
+    url: str,
+    time: np.datetime64,
+    tempdir: Path,
+    session: requests.Session,
+) -> tuple[str, np.datetime64, Path | None]:
     local_path = tempdir / f"{granule_id}.xml"
     try:
         r = session.get(url, timeout=30)
@@ -197,7 +211,7 @@ def _fetch_xml(granule_id: str, url: str, tempdir: Path, session: requests.Sessi
         print(f"[ERROR] Failed to fetch {granule_id}: {e}")
         local_path = None
 
-    return granule_id, local_path
+    return granule_id, time, local_path
 
 
 def _create_session(
@@ -218,3 +232,76 @@ def _create_session(
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+def _apply_scale_offset(ds: xr.Dataset, is_pc: bool = False) -> xr.Dataset:
+    """
+    Apply scale and offset accounting for processing baseline
+
+    Whether to shift the DN values
+      https://operations.dashboard.copernicus.eu/processors-viewer.html?search=S2
+      Tue Jan 25, 2022:
+      "Provision of negative radiometric values (implementing an offset): the dynamic
+       range will be shifted by a band-dependent constant, i.e. BOA_ADD_OFFSET. From
+       the user’s point of view, the L2A Surface Reflectance (L2A SR) shall be retri-
+       eved from the output radiometry as follows:"
+       -> Digital Number DN=0 remains the “NO_DATA” value
+       -> For a given DN in [1;215-1], the L2A Surface Reflectance (SR) value will
+          be: L2A_SRi = (L2A_DNi + BOA_ADD_OFFSETi) / QUANTIFICATION_VALUEi"
+
+    + If using AWS Element84's products, then the offsets may have been applied, see:
+      https://github.com/sertit/eoreader/discussions/120#discussioncomment-7751885
+          and
+      https://github.com/Element84/earth-search
+      "If the offset is anything other than 0, then it should be applied after
+       the scale factor to correct the data."
+
+    + GEE and Sentinel-HUB also provides harmonised datasets
+
+    + In contrast Micrsoft Planetary requires the user to manually apply
+      an offset (-1000) if the processing baseline is >= 4.0. Lack of metadata
+      in the STAC items from Microsoft is frustrating.
+    """
+    def convert2float(da: xr.DataArray) -> xr.DataArray:
+        scale = da.attrs.get("scale", 1.0)
+        offset = da.attrs.get("offset", 0.0)
+        scaled_da = (da * scale + offset).astype(np.float32)
+
+        # not interested in negative reflectances
+        scaled_da = scaled_da.where(scaled_da > 0, 0)
+        scaled_da.attrs["scale"] = 1.0
+        scaled_da.attrs["offset"] = 0.0
+        return scaled_da
+
+    def convert2float_pc(da: xr.DataArray) -> xr.DataArray:
+        """ Handle Planetary Computers' lack of metadata """
+        scale = da.attrs.get("scale", None)
+        offset = da.attrs.get("offset", None)
+        proc_baseline = da.attrs.get("processing_baseline", None)
+
+        msg = "{0}:\n" + f"attrs: {da.attrs}\n{da}"
+        if proc_baseline is None:
+            raise ValueError(msg.format("Unable to resolve the processing baseline"))
+
+        if np.issubdtype(da.data.dtype, np.integer):
+            scale = 10000 if scale is None else scale
+            if offset is None:
+                offset = -1000 if proc_baseline >= 4.0 else 0
+        else:
+            # Why would the unscaled dataset be anything other than int16 or uint16?
+            raise ValueError(msg.format("Unsure how to assign scale and offset"))
+
+        scaled_da = ((da + offset) / scale).astype(np.float32)
+
+        # not interested in negative reflectances
+        scaled_da = scaled_da.where(scaled_da > 0, 0)
+        scaled_da.attrs["scale"] = 1.0
+        scaled_da.attrs["offset"] = 0.0
+        return scaled_da
+
+    convert_func: Callable = convert2float_pc if is_pc else convert2float
+    return xr.Dataset(
+        data_vars={v: convert_func(ds[v]) for v in ds.data_vars},
+        coords=ds.coords,
+        attrs=ds.attrs,
+    )

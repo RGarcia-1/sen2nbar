@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 """ ASSIGN GLOBAL VARIABLES """
-BAND_NAME_TO_ID = {  # verified in <Spectral_Information_List> of MTD_MSIL1C.xml
+BNAME_TO_ID = {  # verified in <Spectral_Information_List> of MTD_MSIL1C.xml
     "B01": "0",
     "B02": "1",
     "B03": "2",
@@ -109,7 +109,7 @@ def _get_values(elt, item_tag: str) -> FLOAT_ARRAY:
 class Sentinel2ViewAngleParser:
     def __init__(self, xml_path: str | Path, band_names: list[str]):
         self.band_names = band_names
-        self.band_ids = [BAND_NAME_TO_ID[b] for b in self.band_names]
+        self.band_ids = [BNAME_TO_ID[b] for b in self.band_names]
         self.xml_content = self._get_xml_contents(xml_path)
         self.root = ET.fromstring(self.xml_content)
 
@@ -128,7 +128,7 @@ class Sentinel2ViewAngleParser:
                 return f.read()
 
     def _process_band(self, band_name: str) -> tuple[str, FLOAT_ARRAY, FLOAT_ARRAY]:
-        band_id = BAND_NAME_TO_ID[band_name]
+        band_id = BNAME_TO_ID[band_name]
         grids = self.tile_angles.findall(
             self.view_key.format(band_id), namespaces=self.ns
         )
