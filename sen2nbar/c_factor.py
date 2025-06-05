@@ -1,4 +1,5 @@
 import rioxarray  # noqa: F401
+import numpy as np
 import xarray as xr
 
 from rasterio.crs import CRS
@@ -63,7 +64,39 @@ def c_factor(
     )
 
 
-def c_factor_from_metadata(metadata: str, is_aws: bool = False) -> xr.DataArray:
+def compute_relative_azimuth(vaa_ds: xr.Dataset, saa_ds) -> xr.Dataset:
+    """
+    The relative azimuth must range between 0 and 180 according to Roujean
+    et al. (1992):
+      "In these expressions [Equations (1) and (2)], theta_{s} and theta_{v}
+       are the sun and view zenith angles, respectively, and phi is the rela-
+       tive azimuth between sun and sensor directions, chosen by convention
+       to be between zero and pi"
+    The BRDF kernels introduced by Roujean et al. (1992) were adapted by
+    Lucht et al. (2000)
+
+    References
+    ----------
+    Roujean et al. (1992). A bidirectional reflectance model of the earth's
+    surface for the correction of remote sensing data. Journal of Geophysical
+    Research, 97(D18), 20,455-20,468
+
+    Lucht et al. (2000). An Algorithm for the Retrieval of Albedo from Space
+    Using Semiempirical BRDF Models. IEEE TRANSACTIONS ON GEOSCIENCE AND
+    REMOTE SENSING, 38(2), 977-998
+    """
+
+    # According to:
+    # https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/S2L1C.html
+    # Viewing and solar azimuths could range between 0 and 360 degrees
+    delta = abs(vaa_ds - saa_ds)
+    raa = xr.where(delta <= 180, delta, 360 - delta)
+    return raa
+
+
+def c_factor_from_metadata(
+    metadata: str, y: np.ndarray, x: np.ndarray, is_aws: bool = False
+) -> xr.DataArray:
     """Gets the c-factor per band from Sentinel-2 granule metadata.
 
     Parameters
@@ -86,8 +119,44 @@ def c_factor_from_metadata(metadata: str, is_aws: bool = False) -> xr.DataArray:
     # Get the Sun and View angles
     zen_ds, azi_ds = angles_from_metadata(metadata)
 
-    # Compute the relative azimuth per band
-    relazi_ds = azi_ds["sun"] - azi_ds[BANDS]
+    zen_subset_ds = zen_ds.sel(x=x, y=y, method="nearest")
+    azi_subset_ds = azi_ds.sel(x=x, y=y, method="nearest")
+
+    """
+    zen_subset_ds = zen_ds.interp(
+        y=y,
+        x=x,
+        method="linear",
+        kwargs={"fill_value": "extrapolate"},
+    )
+
+    azi_subset_ds = azi_ds.interp(
+        y=y,
+        x=x,
+        method="linear",
+        kwargs={"fill_value": "extrapolate"},
+    )
+    """
+
+    import matplotlib.pyplot as plt
+    fig1, axes1 = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True)
+    axes1[0].imshow(azi_ds["B02"], interpolation="None", cmap="Greys_r")
+    axes1[1].imshow(zen_ds["B02"], interpolation="None", cmap="Greys_r")
+    for ax in axes1.flatten():
+        ax.axis("off")
+
+    fig2, axes2 = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True)
+    axes2[0].imshow(azi_subset_ds["B02"], interpolation="None", cmap="Greys_r")
+    axes2[1].imshow(zen_subset_ds["B02"], interpolation="None", cmap="Greys_r")
+    for ax in axes2.flatten():
+        ax.axis("off")
+
+    plt.show()
+    exit()
+
+    # Compute the relative azimuth per band. Note that the relative azimuth
+    # must range between 0 and 180 according to Roujean et al. (1992)
+    relazi_ds = compute_relative_azimuth(vaa_ds=azi_ds[BANDS], saa_ds=azi_ds["sun"])
 
     c = c_factor(
         sun_zenith=zen_ds["sun"], view_zenith=zen_ds[BANDS], relative_azimuth=relazi_ds
@@ -124,7 +193,7 @@ def c_factor_from_metadata(metadata: str, is_aws: bool = False) -> xr.DataArray:
 
 
 def c_factor_from_xml(
-    metadata_xml: str, dst_crs: Any, is_aws: bool = False
+    metadata_xml: str, dst_crs: Any, y: np.ndarray, x: np.ndarray, is_aws: bool = False
 ) -> xr.DataArray:
     """Gets the c-factor per band from a Sentinel-2 :code:`pystac.Item`.
 
@@ -148,7 +217,7 @@ def c_factor_from_xml(
     dst_crs = CRS.from_user_input(dst_crs)
 
     # Compute the c-factor and extrapolate
-    c = c_factor_from_metadata(metadata_xml, is_aws)
+    c = c_factor_from_metadata(metadata_xml, y, x, is_aws)
     c = _extrapolate_c_factor(c)
 
     src_crs = CRS.from_string(c.attrs["crs"])

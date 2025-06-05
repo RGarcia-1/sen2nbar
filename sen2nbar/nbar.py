@@ -190,11 +190,12 @@ def nbar_stac(
         other_vars = [k for k in ds.data_vars if k.lower() in OTHER_DVARS]
 
         for granule_id in xml_md:
+            print(granule_id)
             xml_path = xml_md[granule_id]["local_xml"]
             time = xml_md[granule_id]["time"]
 
             # `c_id` is xr.Dataset dims=["y", "x"]
-            c_id = c_factor_from_xml(xml_path, dst_crs=epsg, is_aws=is_aws)
+            c_id = c_factor_from_xml(xml_path, dst_crs=epsg, is_aws=is_aws, y=ds.y.values, x=ds.x.values)
             c_id.attrs = {"time": time, "id": granule_id}
 
             # interpolate `c_id` to match `y` and `x` of `ds`
@@ -203,7 +204,7 @@ def nbar_stac(
                 x=ds.x.values,
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
-            ).astype(np.float32)
+            ).astype(np.float64)
 
             # time is not unique therefore use the ID for the matching
             time_match = [
