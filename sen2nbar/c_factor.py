@@ -1,5 +1,6 @@
 import rioxarray  # noqa: F401
 import numpy as np
+import numpy.typing as npt
 import xarray as xr
 
 from rasterio.crs import CRS
@@ -95,14 +96,26 @@ def compute_relative_azimuth(vaa_ds: xr.Dataset, saa_ds) -> xr.Dataset:
 
 
 def c_factor_from_metadata(
-    metadata: str, y: np.ndarray, x: np.ndarray, is_aws: bool = False
+    tile_id: str,
+    metadata_xml: str,
+    y: npt.NDArray[np.floating],
+    x: npt.NDArray[np.floating],
+    crs: CRS,
+    is_aws: bool = False,
 ) -> xr.DataArray:
     """Gets the c-factor per band from Sentinel-2 granule metadata.
 
     Parameters
     ----------
-    metadata : str
-        Path to the metadata file. An URL can also be used.
+    tile_id : str
+        Unique Sentinel 2 tile identifier (e.g. "S2B_50HMJ_20200605_1_L2A")
+    metadata_xml : str
+        Path to the metadata xml file. An URL can also be used.
+    y, x : npt.NDArray[np.floating]
+        x and y coordinates in a CRS defined by `crs`
+    crs : CRS
+        Coordinate Reference System used to reproject viewing and solar
+        angles.
     is_aws : bool
         Whether the STAC dataset was taken from AWS Element84.
         AWS Element84 uses different band naming convention
@@ -117,7 +130,7 @@ def c_factor_from_metadata(
     BANDS = list(fiso.keys())
 
     # Get the Sun and View angles
-    zen_ds, azi_ds = angles_from_metadata(metadata)
+    zen_ds, azi_ds = angles_from_metadata(tile_id, metadata_xml, crs, multiproc=False)
 
     zen_subset_ds = zen_ds.sel(x=x, y=y, method="nearest")
     azi_subset_ds = azi_ds.sel(x=x, y=y, method="nearest")
@@ -139,6 +152,7 @@ def c_factor_from_metadata(
     """
 
     import matplotlib.pyplot as plt
+
     fig1, axes1 = plt.subplots(nrows=1, ncols=2, sharex=True, sharey=True)
     axes1[0].imshow(azi_ds["B02"], interpolation="None", cmap="Greys_r")
     axes1[1].imshow(zen_ds["B02"], interpolation="None", cmap="Greys_r")
@@ -172,7 +186,7 @@ def c_factor_from_metadata(
             b: (dims, c[b].sel(band=b).data) for b in c.data_vars  # this is the worst
         },
         coords=coords,
-        attrs=c.attrs
+        attrs=c.attrs,
     )
 
     # `c_fixed` has been verified with the following:
@@ -193,15 +207,24 @@ def c_factor_from_metadata(
 
 
 def c_factor_from_xml(
-    metadata_xml: str, dst_crs: Any, y: np.ndarray, x: np.ndarray, is_aws: bool = False
+    tile_id: str,
+    metadata_xml: str,
+    y: npt.NDArray[np.floating],
+    x: npt.NDArray[np.floating],
+    crs: Any,
+    is_aws: bool = False,
 ) -> xr.DataArray:
     """Gets the c-factor per band from a Sentinel-2 :code:`pystac.Item`.
 
     Parameters
     ----------
+    tile_id : str
+        Unique Sentinel 2 tile identifier (e.g. "S2B_50HMJ_20200605_1_L2A")
     metadata_xml : str
         metadata xml
-    dst_crs : Any
+    y, x : npt.NDArray[np.floating]
+        x and y coordinates with a CRS defined by `crs`
+    crs : Any
         destination CRS
     is_aws : bool
         Whether the STAC dataset was taken from AWS Element84.
@@ -214,19 +237,19 @@ def c_factor_from_xml(
         c-factor.
     """
     # Retrieve the EPSG from the item
-    dst_crs = CRS.from_user_input(dst_crs)
+    crs = CRS.from_user_input(crs)
 
     # Compute the c-factor and extrapolate
-    c = c_factor_from_metadata(metadata_xml, y, x, is_aws)
+    c = c_factor_from_metadata(tile_id, metadata_xml, y, x, crs, is_aws)
     c = _extrapolate_c_factor(c)
 
     src_crs = CRS.from_string(c.attrs["crs"])
     c.rio.write_crs(src_crs, inplace=True)
 
     # If the CRSs are different: reproject
-    if src_crs.to_epsg() != dst_crs.to_epsg():
+    if src_crs.to_epsg() != crs.to_epsg():
 
-        c = c.rio.reproject(dst_crs).drop("spatial_ref")
-        c.rio.write_crs(dst_crs, inplace=True)
+        c = c.rio.reproject(crs).drop("spatial_ref")
+        c.rio.write_crs(crs, inplace=True)
 
     return c

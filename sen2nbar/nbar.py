@@ -158,7 +158,6 @@ def nbar_stac(
 
     # Keep attributes xarray
     xr.set_options(keep_attrs=True)
-
     # 1. Get the xml url for each ID in the dataset
     xml_md = _get_xml_dict(ds, stac, collection)  # dict[str, dict[str, datetime | str]]
     with tempfile.TemporaryDirectory() as tmp:
@@ -195,7 +194,14 @@ def nbar_stac(
             time = xml_md[granule_id]["time"]
 
             # `c_id` is xr.Dataset dims=["y", "x"]
-            c_id = c_factor_from_xml(xml_path, dst_crs=epsg, is_aws=is_aws, y=ds.y.values, x=ds.x.values)
+            c_id = c_factor_from_xml(
+                tile_id=granule_id,
+                metadata_xml=xml_path,
+                y=ds.y.values,
+                x=ds.x.values,
+                crs=epsg,
+                is_aws=is_aws,
+            )
             c_id.attrs = {"time": time, "id": granule_id}
 
             # interpolate `c_id` to match `y` and `x` of `ds`

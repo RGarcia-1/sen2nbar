@@ -2,10 +2,10 @@
 Functions used to acquire the detector footprints
 """
 
+import requests
 import geopandas as gpd
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pprint import pprint
 from rasterio.crs import CRS
 
 
@@ -33,7 +33,7 @@ class Sentinel2DetFoo(object):
         self.dst_crs = dst_crs
         self.max_workers = max_workers
         self.base_url = self.construct_base_url()
-        pprint(self.base_url)
+        return
 
     def construct_base_url(self) -> str:
         """
@@ -64,18 +64,21 @@ class Sentinel2DetFoo(object):
         url = self.base_url.format(band)
         gdf: gpd.GeoDataFrame | None = None
 
-        # TODO: CHECK THIS!!!
-        try:
+        if self.url_exists(url):
             gdf = gpd.read_file(url).to_crs(self.dst_crs)
             gdf["band"] = band
-            if "gml_id" in gdf.columns:
-                gdf["detector_id"] = gdf["gml_id"].str.extract(r"(\d+)$")[0]
-            else:
-                gdf["detector_id"] = [str(i) for i in range(len(gdf))]
-            gdf = gdf[["band", "detector_id", "geometry"]]
 
-        except Exception as e:
-            print(f"Failed to load {band} from {url}: {e}")
+            if "gml_id" in gdf.columns:
+                # extract the detector id from the "gml_id" column
+                # e.g. "detector_footprint-B01-09-0", here the detector id = 9
+                detector_id = gdf["gml_id"].str.split("-").str[2].astype(int)
+                gdf["detector_id"] = detector_id
+                gdf = gdf[["band", "detector_id", "geometry"]]
+            else:
+                raise ValueError("Unable to identify the detector id\n{gdf}")
+        else:
+            print(f"Failed to load {band} from {url}")
+
         return gdf
 
     def construct_gdf(self):
@@ -83,7 +86,7 @@ class Sentinel2DetFoo(object):
         Acqure GML files and contruct the GeoDataFrame that
         contains the detector footprint for all bands
         """
-        results: list[gpd.GeoDataFrame | None] = []
+        results: list[gpd.GeoDataFrame] = []
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(self.fetch_gml, b): b for b in self.bands}
@@ -101,3 +104,11 @@ class Sentinel2DetFoo(object):
         )
         gdf_detfoo.set_index(["band", "detector_id"], inplace=True)
         return gdf_detfoo
+
+    @staticmethod
+    def url_exists(url: str, timeout: int=3) -> bool:
+        try:
+            response = requests.head(url, timeout=timeout)
+            return response.status_code < 400
+        except requests.RequestException:
+            return False
